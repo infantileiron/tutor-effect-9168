@@ -1,3 +1,5 @@
 ROLES=('admin','analyst','viewer')
 REPORT_STATUSES=('queued','running','completed','failed')
 GROUPS=('control','intervention')
+BATCH_STATUSES=('pending','ready','published')
+RESOLUTION_DECISIONS=('keep_appeal','use_recalc')

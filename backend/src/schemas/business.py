@@ -24,3 +24,43 @@ class RunInput(BaseModel):
 class ConclusionInput(BaseModel):
     conclusion:str=Field(min_length=4,max_length=3000)
     published:bool=False
+
+class ExamInput(BaseModel):
+    title:str=Field(min_length=2,max_length=120)
+    max_score:float=Field(default=100,gt=0,le=1000,allow_inf_nan=False)
+
+class QuestionInput(BaseModel):
+    number:str=Field(min_length=1,max_length=20)
+    full_score:float=Field(gt=0,le=1000,allow_inf_nan=False)
+    answer:str|None=Field(default=None,max_length=20)
+    cancelled:bool=False
+
+class AnswerSheetInput(BaseModel):
+    student_code:str=Field(min_length=1,max_length=50)
+    answers:dict[str,str]=Field(default_factory=dict)
+    absent:bool=False
+    @model_validator(mode='after')
+    def answers_required(self):
+        if not self.absent and not self.answers: raise ValueError('非缺考答卷必须至少登记一题作答')
+        return self
+
+class RecalcInput(BaseModel):
+    questions:list[QuestionInput]=Field(min_length=1,max_length=200)
+
+class AppealInput(BaseModel):
+    student_code:str=Field(min_length=1,max_length=50)
+    score:float|None=Field(default=None,ge=0,le=1000,allow_inf_nan=False)
+    note:str=Field(default='',max_length=2000)
+    expected_version:int|None=Field(default=None,ge=0)
+
+class ResolutionInput(BaseModel):
+    student_code:str=Field(min_length=1,max_length=50)
+    decision:Literal['keep_appeal','use_recalc']
+    expected_appeal_version:int=Field(ge=0)
+
+class PublishInput(BaseModel):
+    request_key:str=Field(min_length=8,max_length=80)
+    expected_version:int=Field(ge=1)
+
+class BatchCreateInput(BaseModel):
+    exam_id:int=Field(gt=0)

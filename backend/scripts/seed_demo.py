@@ -2,9 +2,30 @@ import random,json
 from datetime import datetime,timezone
 from sqlalchemy import select,func
 from src.config.database import Base,engine,SessionLocal
-from src.models.entities import User,Student,Plan,Report
+from src.models.entities import User,Student,Plan,Report,Exam,Question,AnswerSheet,Batch
 from src.utils.security import hash_password
 from src.services.statistics import welch
+
+QUESTIONS=[('1',10,'A'),('2',10,'B'),('3',10,'C'),('4',15,'D'),('5',15,'A'),('6',20,'B'),('7',20,'C')]
+OPTIONS=('A','B','C','D')
+
+def seed_grading(db,rng):
+    title='2026秋季 · 客观题单元测验'
+    exam=db.scalar(select(Exam).where(Exam.title==title))
+    if exam: return exam
+    exam=Exam(title=title,max_score=100.0,created_at=datetime.now(timezone.utc).isoformat());db.add(exam);db.flush()
+    for number,full,answer in QUESTIONS:
+        db.add(Question(exam_id=exam.id,number=number,full_score=full,answer=answer,cancelled=False))
+    for i in range(48):
+        code=f'ZX-2026-{i+1:03}'
+        answers={}
+        for number,full,answer in QUESTIONS:
+            roll=rng.random()
+            answers[number]=answer if roll<.62 else rng.choice([o for o in OPTIONS if o!=answer])
+        db.add(AnswerSheet(exam_id=exam.id,student_code=code,answers=answers,absent=i%24==0 and i>0,appeal_version=0))
+    db.add(Batch(exam_id=exam.id,status='pending',version=0,created_at=datetime.now(timezone.utc).isoformat()))
+    db.commit()
+    return exam
 
 def seed():
     Base.metadata.create_all(engine)
@@ -28,5 +49,6 @@ def seed():
         if not db.scalar(select(Report).where(Report.plan_id==plan.id)):
             result=welch(db.scalars(select(Student).order_by(Student.code)).all(),plan)
             db.add(Report(plan_id=plan.id,status='completed',result=result,created_at=datetime.now(timezone.utc).isoformat(),conclusion='干预组均分较高。建议保留教学点分层观察，并在下一轮随机分组验证。',published=True));db.commit()
-        print(json.dumps({table:db.scalar(select(func.count()).select_from(model)) for table,model in [('users',User),('students',Student),('plans',Plan),('reports',Report)]}))
+        seed_grading(db,rng)
+        print(json.dumps({table:db.scalar(select(func.count()).select_from(model)) for table,model in [('users',User),('students',Student),('plans',Plan),('reports',Report),('exams',Exam),('sheets',AnswerSheet)]}))
 if __name__=='__main__': seed()

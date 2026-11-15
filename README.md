@@ -7,6 +7,18 @@
 
 四个业务模块：**成绩样本**支持筛选、录入和修订；**辅导分组**登记研究范围和排除规则；**检验工作台**提交后台任务并查看失败原因与历史结果；**教研结论**起草解释、负责人签核并下载包括原始样本快照的 JSON 报告。业务数据均在 PostgreSQL 中持久化，统计由 Python worker 计算。
 
+## 成绩勘误与整批评分
+独立模块 **成绩勘误**（`#grading`）处理客观题试卷的勘误与重评：按学号和题号登记答卷与评分规则，勘误可**更正标准答案**或**取消题目**；取消后按剩余满分折算百分制，**缺答计零**，**缺考保留**不计入折算。
+
+- 重评状态 `待计算 → 可发布 → 已发布`。重评只写工作列，并逐人保存分差与题目贡献（哪题由错变对、哪题取消、剩余满分如何变化），页面逐人展示分差解释。
+- 整批发布一次性切换：同一事务写入全部 `published_*` 并生成校验码；事务中断则回滚，旧版整批保留。`expected_version` 防止用过期页面覆盖新版本；`request_key` 幂等，同一次发布重试不重复改分。
+- 发布前若成绩被申诉修改，按学员**隔离冲突**并冻结发布，要求逐人裁决（保留申诉分 / 采用重评分）。每次申诉带递增版本号，裁决和发布时重新核对，**裁决期间再次改分会被识别并拒绝**。
+- 检验只读取**完整发布批次**的冻结快照（`batches.published_snapshot` 与该版本 `reflections.published_snapshot` 双重校验），输出均分、中位数、及格率、分段分布，并携带评分规则、逐人答卷与得分依据，可导出 JSON。
+- 原有「教研结论」报告沿用各自的样本快照，**勘误不影响既有报告**；新的检验结果单独追溯答卷和评分依据。
+
+相关接口：`POST /exams`、`PUT /exams/{id}/sheets/{code}`、`POST /exams/{id}/rules`、`POST /exams/{id}/appeals`、`POST /batches/{id}/recalc`、`POST /batches/{id}/resolutions`、`POST /batches/{id}/publish`（管理员）、`POST /batches/{id}/verify`、`GET /batches/{id}/verifications`。验收测试见 `backend/tests/test_grading.py`（含取消全部题目、申诉插入、发布中断、并发/幂等发布、篡改快照拒检）。
+
+
 ## 启动
 ```sh
 cp .env.example .env
@@ -51,9 +63,9 @@ seed 使用 Random(20261115)：160 名学员，4 教学点、各 80 人两组、
 |数据与队列|PostgreSQL 16、Redis 7，独立 Python worker|
 |认证|PyJWT 2.10.1、PBKDF2|
 
-`frontend/src/api` 负责请求，`stores` 管业务状态，`pages` 分四页，`components/common` 复用结果、表格、状态和通知，`hooks` 封装表单/轮询，`utils` 做转义/下载。`backend/src/models` 定义表，`schemas` 验证，`services` 处理业务与算法，`routes` 提供接口，`controllers` 序列化，`middlewares` 处理审计和全局错误。`backend/migrations/001_initial.sql` 是初始结构；启动使用 metadata.create_all，后续字段迁移需人工管理。
+`frontend/src/api` 负责请求，`stores` 管业务状态，`pages` 分五页（含成绩勘误），`components/common` 复用结果、表格、状态和通知，`hooks` 封装表单/轮询，`utils` 做转义/下载。`backend/src/models` 定义表，`schemas` 验证，`services` 处理业务与算法，`routes` 提供接口，`controllers` 序列化，`middlewares` 处理审计和全局错误。`backend/migrations/001_initial.sql` 是初始结构；启动使用 metadata.create_all，后续字段迁移需人工管理。
 
-共享枚举位置：角色 ROLES、分组 GROUPS、报告状态 REPORT_STATUSES 在 `backend/src/constants/enums.py`；前端对应 `frontend/src/constants/enums.js` 的 ROLES、GROUPS、STATUS。API输入的 group 枚举同时在 `backend/src/schemas/business.py` 校验。
+共享枚举位置：角色 ROLES、分组 GROUPS、报告状态 REPORT_STATUSES、批次状态 BATCH_STATUSES、裁决 RESOLUTION_DECISIONS 在 `backend/src/constants/enums.py`；前端对应 `frontend/src/constants/enums.js` 的 ROLES、GROUPS、STATUS、BATCH_STATUS、RESOLUTION。API输入的 group 枚举同时在 `backend/src/schemas/business.py` 校验。
 
 ## Docker 与环境变量
 恰好五服务：frontend/backend/worker/db/redis，各有健康检查。backend 和 worker 依赖健康 DB/Redis，frontend 依赖 backend；worker 依赖 backend 初始化完成。数据库、Redis AOF、报告产物预留共享卷分别命名。worker 真正从 Redis 唤醒并处理数据库待执行任务，每 2 秒更新心跳。Redis 任务通知丢失仍会扫描数据库待执行任务。计算结果权威存于数据库，shared reports 卷供未来文件归档；当前 JSON 按快照直接导出。
@@ -61,9 +73,9 @@ seed 使用 Random(20261115)：160 名学员，4 教学点、各 80 人两组、
 `.env.example` 列出 COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、POSTGRES_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET（默认 10.253.103.0/24）。所有变量均可覆盖；默认是本地演示配置，外部部署前需更换密码和 JWT_SECRET。`.env` 已忽略。每次最多允许 10 个待执行任务，HTTP 429 提示等待。
 
 ## 本地开发
-后端在 Python3.11 虚拟环境运行 `pip install -r backend/requirements.txt`，设置 DATABASE_URL、REDIS_URL、JWT_SECRET，进入 backend 后运行 `uvicorn src.main:app --reload` 和另一个终端 `python -m src.worker`。前端无打包步骤，可直接由 Nginx 提供静态文件并代理 /api/。
+后端在 Python3.11 虚拟环境运行 `pip install -r backend/requirements.txt`，设置 DATABASE_URL、REDIS_URL、JWT_SECRET，进入 backend 后运行 `uvicorn src.main:app --reload` 和另一个终端 `python -m src.worker`。前端无打包步骤，可直接由 Nginx 提供静态文件并代理 /api/。后端单元/验收测试：`cd backend && pytest tests/test_grading.py`（默认使用内存 SQLite，无需 PostgreSQL 或 Redis）。
 
 ## 已知范围
-不含 CSV 批量导入、随机分组器或多重比较校正；成绩可逐条录入/修订。教学点为自由文本，前端方案选项来自现有成绩。初始报告为同步真实计算的演示快照，新提交报告全部走异步 worker。外网字体不可用时使用本地 serif 回退。进程中断在 running 状态的任务需管理员在数据库重置为 queued；当前小型版本未提供任务取消/自动回收。审计列表只给管理员，最多最近 100 条。
+不含 CSV 批量导入、随机分组器或多重比较校正；成绩可逐条录入/修订。教学点为自由文本，前端方案选项来自现有成绩。初始报告为同步真实计算的演示快照，新提交报告全部走异步 worker。外网字体不可用时使用本地 serif 回退。进程中断在 running 状态的任务需管理员在数据库重置为 queued；当前小型版本未提供任务取消/自动回收。审计列表只给管理员，最多最近 100 条。成绩勘误的客观题仅支持单选（题号:选项），不含多选或主观题；检验为描述统计（均分/中位数/及格率/分布），不发票统计推断。取消全部题目会因剩余满分为 0 被拒绝；已发布版本不可再裁决，需先重评形成新的工作版本。
 
 License: MIT（见 LICENSE）。真实验收证据在批次根 `test-artifacts/gb-3103/`，源码目录不含截图或测试报告。
